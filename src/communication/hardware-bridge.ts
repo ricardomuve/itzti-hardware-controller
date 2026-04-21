@@ -13,6 +13,7 @@ import { createHardwarePort } from './environment';
 import { serialize, deserialize } from './serialization';
 import type { HardwareCommand } from './types';
 import { useDeviceStore } from '../store/device-store';
+import { useCheckbackStore } from '../store/checkback-store';
 
 let port: IHardwarePort | null = null;
 let initialized = false;
@@ -36,18 +37,20 @@ export async function initBridge(): Promise<IHardwarePort> {
     try {
       const response = deserialize(data);
       const store = useDeviceStore.getState();
+      const checkback = useCheckbackStore.getState();
       const connectedDevice = store.devices.find((d) => d.status === 'connected');
       if (connectedDevice) {
-        // Update confirmed params based on response command type
         const paramName = commandTypeToParamName(response.type);
         if (paramName !== null && response.payload.length > 0) {
           const value = extractValue(response);
+          // Update confirmed param in device store
           store.updateDeviceParam(connectedDevice.id, paramName, value);
+          // Feed ACK into check-back system for verification
+          checkback.handleAck(connectedDevice.id, paramName, value);
         }
       }
     } catch {
       // Deserialization errors are handled by onError or silently discarded
-      // per Req 11.5 — invalid data is discarded
     }
   });
 
@@ -71,22 +74,48 @@ export async function initBridge(): Promise<IHardwarePort> {
   });
 
   initialized = true;
+
+  // Wire up check-back retry callback
+  useCheckbackStore.getState().setRetryCallback((deviceId, paramName, value) => {
+    const cmdType = paramNameToCommandType(paramName);
+    if (cmdType !== null) {
+      const payload = buildPayload(cmdType, value);
+      sendCommand(deviceId, { type: cmdType, payload }).catch(() => {
+        // Retry send failed — will be caught by timeout checker
+      });
+    }
+  });
+
+  // Start periodic timeout checker (every 1s)
+  setInterval(() => {
+    useCheckbackStore.getState().checkTimeouts();
+  }, 1000);
+
   return port;
 }
 
 /**
  * Sends a serialized command to the connected device via the hardware port.
+ * Registers the command in the check-back store for ACK verification.
  *
- * @param _deviceId - Target device identifier (reserved for multi-device support)
+ * @param deviceId - Target device identifier
  * @param command - The HardwareCommand to serialize and send
  */
 export async function sendCommand(
-  _deviceId: string,
+  deviceId: string,
   command: HardwareCommand
 ): Promise<void> {
   if (!port || !port.isConnected()) {
     throw new Error('No hay conexión activa con el dispositivo.');
   }
+
+  // Register in check-back store before sending
+  const paramName = commandTypeToParamName(command.type);
+  if (paramName !== null && command.payload.length > 0) {
+    const value = extractValue(command);
+    useCheckbackStore.getState().registerCommand(deviceId, paramName, value);
+  }
+
   const bytes = serialize(command);
   await port.write(bytes);
 }
@@ -145,4 +174,33 @@ function extractValue(cmd: HardwareCommand): number {
     return (cmd.payload[0] << 8) | cmd.payload[1];
   }
   return 0;
+}
+
+/** Reverse mapping: param name → CommandType for retries. */
+function paramNameToCommandType(paramName: string): CommandType | null {
+  switch (paramName) {
+    case 'brightness': return CommandType.SetBrightness;
+    case 'position': return CommandType.SetActuatorPos;
+    case 'speed': return CommandType.SetActuatorSpeed;
+    case 'volume': return CommandType.SetVolume;
+    case 'audioSource': return CommandType.SelectAudioSource;
+    case 'lightOn': return CommandType.ToggleLight;
+    default: return null;
+  }
+}
+
+/** Builds the payload array for a given command type and value. */
+function buildPayload(type: CommandType, value: number): number[] {
+  switch (type) {
+    case CommandType.SetBrightness:
+    case CommandType.SetVolume:
+    case CommandType.SelectAudioSource:
+    case CommandType.ToggleLight:
+      return [value & 0xff];
+    case CommandType.SetActuatorPos:
+    case CommandType.SetActuatorSpeed:
+      return [(value >> 8) & 0xff, value & 0xff];
+    default:
+      return [];
+  }
 }

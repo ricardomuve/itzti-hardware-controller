@@ -26,6 +26,7 @@ import SessionControl from './SessionControl';
 import AudioControl from './AudioControl';
 import BiometricWaveform from './BiometricWaveform';
 import SafeModeIndicator from './SafeModeIndicator';
+import HardwareFaultBanner from './HardwareFaultBanner';
 
 export interface AuthGateProps {
   /** Optional callback when login/logout button is clicked */
@@ -56,6 +57,7 @@ export function getVisibleComponents(role: UserRole): Set<string> {
       'AudioControl',
       'BiometricWaveform',
       'SafeModeIndicator',
+      'HardwareFaultBanner',
     ]);
   }
 
@@ -114,6 +116,9 @@ export default function AuthGate({ onLoginLogout }: AuthGateProps) {
       {/* Expert-only components */}
       {role === 'expert' && (
         <div className="space-y-6">
+          {/* Hardware fault alerts — highest priority, always visible */}
+          <HardwareFaultBanner />
+
           {/* Biometric monitoring — top priority for tank sessions */}
           <section data-testid="expert-biometric-panel" className="bg-surface-alt rounded-xl border border-border p-5">
             <BiometricPanel />
