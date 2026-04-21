@@ -6,6 +6,7 @@ mod audio_engine;
 mod closed_loop;
 mod commands;
 mod i2c_driver;
+mod safe_mode_defaults;
 mod serial_port;
 mod session_db;
 mod spi_driver;
@@ -111,6 +112,7 @@ fn main() {
             commands::watchdog_force_safe_mode,
             commands::watchdog_exit_safe_mode,
             commands::watchdog_get_state,
+            commands::get_safe_mode_defaults,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -583,3 +583,14 @@ pub fn watchdog_exit_safe_mode(engine: State<'_, SharedWatchdog>) -> Result<(), 
 pub fn watchdog_get_state(engine: State<'_, SharedWatchdog>) -> Result<WatchdogState, String> {
     engine.get_state()
 }
+
+
+// ---------------------------------------------------------------------------
+// Safe mode defaults query
+// ---------------------------------------------------------------------------
+
+/// Returns the complete safe mode parameter table for UI display.
+#[tauri::command]
+pub fn get_safe_mode_defaults() -> Vec<crate::safe_mode_defaults::SafeModeParam> {
+    crate::safe_mode_defaults::SAFE_MODE_PARAMS.to_vec()
+}

@@ -6,6 +6,7 @@
 
 import { useState, useCallback, useEffect } from 'react';
 import type { WatchdogState, SafeModeReason } from '../communication/types';
+import { SAFE_MODE_PARAMS, type SafeModeParam } from '../communication/safe-mode-defaults';
 
 function isTauri(): boolean {
   return typeof window !== 'undefined' && '__TAURI__' in window;
@@ -185,6 +186,32 @@ export default function SafeModeIndicator() {
         <p className="text-[9px] text-text-muted">
           Watchdog disponible solo en modo Tauri (con MCU conectado).
         </p>
+      )}
+
+      {/* Safe mode parameter table */}
+      {state.mcuInSafeMode && (
+        <div className="space-y-1.5">
+          <span className="text-[9px] text-text-muted uppercase tracking-widest">Valores de Modo Seguro</span>
+          <div className="max-h-40 overflow-y-auto space-y-0.5">
+            {SAFE_MODE_PARAMS.map((p) => (
+              <div
+                key={p.paramName}
+                className={`flex items-center justify-between px-2 py-1 rounded text-[10px] ${
+                  p.priority === 'critical'
+                    ? 'bg-danger/10 text-danger'
+                    : p.priority === 'high'
+                      ? 'bg-warning/10 text-warning'
+                      : 'bg-surface text-text-muted'
+                }`}
+              >
+                <span className="font-medium">{p.label}</span>
+                <span className="font-mono tabular-nums">
+                  {p.safeValue}{p.unit ? ` ${p.unit}` : ''}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
       )}
     </div>
   );
