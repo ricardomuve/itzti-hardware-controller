@@ -41,6 +41,10 @@ const EXPERT_ONLY: ReadonlySet<string> = new Set([
   'PresetEditor',
   'ThresholdControls',
   'OutputControls',
+  'BiometricPanel',
+  'SessionControl',
+  'AudioControl',
+  'BiometricWaveform',
 ]);
 
 /** Components that should be visible ONLY for the user role */

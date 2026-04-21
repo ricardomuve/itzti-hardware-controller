@@ -90,3 +90,70 @@ export interface SpiTransferResult {
   rxData: number[];
   timestamp: number;
 }
+
+// --- Biometric Types (Sensory Deprivation Tank) ---
+
+/** EEG frequency band power values in µV² */
+export interface EegBands {
+  delta: number;   // 0.5–4 Hz  (deep sleep)
+  theta: number;   // 4–8 Hz    (meditation, drowsiness)
+  alpha: number;   // 8–13 Hz   (relaxation)
+  beta: number;    // 13–30 Hz  (active thinking)
+  gamma: number;   // 30–100 Hz (high-level processing)
+}
+
+/** A single biometric sample from any sensor type */
+export interface BiometricSample {
+  sensorType: BiometricSensorType;
+  channelId: string;
+  value: number;
+  timestamp: number;
+  /** Optional EEG band breakdown when sensorType is 'eeg' */
+  eegBands?: EegBands;
+}
+
+export type BiometricSensorType = 'eeg' | 'pulse' | 'temperature' | 'gsr' | 'spo2';
+
+/** Threshold configuration for a single biometric channel */
+export interface BiometricThreshold {
+  channelId: string;
+  sensorType: BiometricSensorType;
+  min: number;
+  max: number;
+  /** Action to take when threshold is crossed */
+  action: ThresholdAction;
+}
+
+export type ThresholdAction =
+  | { type: 'adjust_actuator'; deviceId: string; paramName: string; targetValue: number }
+  | { type: 'adjust_audio'; volumeDelta: number; pitchDelta: number }
+  | { type: 'alert_only' };
+
+/** Closed-loop state emitted from Rust backend */
+export interface ClosedLoopState {
+  active: boolean;
+  sessionId: string | null;
+  /** Current relaxation depth score 0–100 */
+  relaxationScore: number;
+  /** Active threshold violations */
+  violations: ThresholdViolation[];
+  /** Timestamp of last evaluation cycle */
+  lastCycleTimestamp: number;
+}
+
+export interface ThresholdViolation {
+  channelId: string;
+  sensorType: BiometricSensorType;
+  currentValue: number;
+  threshold: { min: number; max: number };
+  action: ThresholdAction;
+  timestamp: number;
+}
+
+/** Commands for closed-loop control (Rust ↔ Frontend) */
+export enum ClosedLoopCommand {
+  StartSession = 0x20,
+  StopSession = 0x21,
+  UpdateThresholds = 0x22,
+  RequestState = 0x23,
+}

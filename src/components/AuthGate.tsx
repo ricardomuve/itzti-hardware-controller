@@ -21,6 +21,10 @@ import SignalDashboard from './SignalDashboard';
 import PresetSelector from './PresetSelector';
 import PresetEditor from './PresetEditor';
 import OutputControls from './OutputControls';
+import BiometricPanel from './BiometricPanel';
+import SessionControl from './SessionControl';
+import AudioControl from './AudioControl';
+import BiometricWaveform from './BiometricWaveform';
 
 export interface AuthGateProps {
   /** Optional callback when login/logout button is clicked */
@@ -46,6 +50,10 @@ export function getVisibleComponents(role: UserRole): Set<string> {
       'ThresholdControls',
       'SignalDashboard',
       'OutputControls',
+      'BiometricPanel',
+      'SessionControl',
+      'AudioControl',
+      'BiometricWaveform',
     ]);
   }
 
@@ -104,6 +112,24 @@ export default function AuthGate({ onLoginLogout }: AuthGateProps) {
       {/* Expert-only components */}
       {role === 'expert' && (
         <div className="space-y-6">
+          {/* Biometric monitoring — top priority for tank sessions */}
+          <section data-testid="expert-biometric-panel" className="bg-surface-alt rounded-xl border border-border p-5">
+            <BiometricPanel />
+          </section>
+
+          {/* High-speed biometric waveform visualization */}
+          <section data-testid="expert-biometric-waveform" className="bg-surface-alt rounded-xl border border-border p-5">
+            <BiometricWaveform />
+          </section>
+
+          {/* Session control */}
+          <section data-testid="expert-session-control" className="bg-surface-alt rounded-xl border border-border p-5">
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+              <SessionControl />
+              <AudioControl />
+            </div>
+          </section>
+
           <section data-testid="expert-dashboard" className="bg-surface-alt rounded-xl border border-border p-5">
             <Dashboard />
           </section>

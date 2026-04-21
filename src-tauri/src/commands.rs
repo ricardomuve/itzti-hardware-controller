@@ -1,5 +1,5 @@
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tauri::{AppHandle, Emitter, State};
 
@@ -304,4 +304,238 @@ pub fn stop_spi_continuous(
     shared: State<'_, SharedSpi>,
 ) -> Result<(), String> {
     spi_driver::stop_continuous_reading(&shared, bus_number, chip_select).map_err(|e| e.message)
+}
+
+
+// ---------------------------------------------------------------------------
+// Closed-loop biometric control commands
+// ---------------------------------------------------------------------------
+
+use crate::closed_loop::{
+    BiometricSample, BiometricThreshold, ClosedLoopState, ControlMessage, SharedClosedLoop,
+};
+
+/// Pushes a biometric sample into the closed-loop engine.
+///
+/// Called from the frontend when sensor data arrives (via serial/I2C/mock).
+#[tauri::command]
+pub fn push_biometric_sample(
+    sample: BiometricSample,
+    engine: State<'_, SharedClosedLoop>,
+) -> Result<(), String> {
+    let engine = engine.lock().map_err(|e| format!("Lock error: {}", e))?;
+    engine.send(ControlMessage::Sample(sample))
+}
+
+/// Updates the threshold configuration for the closed-loop engine.
+#[tauri::command]
+pub fn update_thresholds(
+    thresholds: Vec<BiometricThreshold>,
+    engine: State<'_, SharedClosedLoop>,
+) -> Result<(), String> {
+    let engine = engine.lock().map_err(|e| format!("Lock error: {}", e))?;
+    engine.send(ControlMessage::UpdateThresholds(thresholds))
+}
+
+/// Starts a closed-loop biometric session.
+#[tauri::command]
+pub fn start_biometric_session(
+    session_id: String,
+    engine: State<'_, SharedClosedLoop>,
+) -> Result<(), String> {
+    let engine = engine.lock().map_err(|e| format!("Lock error: {}", e))?;
+    engine.send(ControlMessage::StartSession { session_id })
+}
+
+/// Stops the current biometric session.
+#[tauri::command]
+pub fn stop_biometric_session(
+    engine: State<'_, SharedClosedLoop>,
+) -> Result<(), String> {
+    let engine = engine.lock().map_err(|e| format!("Lock error: {}", e))?;
+    engine.send(ControlMessage::StopSession)
+}
+
+/// Returns the current closed-loop state.
+#[tauri::command]
+pub fn get_closed_loop_state(
+    engine: State<'_, SharedClosedLoop>,
+) -> Result<ClosedLoopState, String> {
+    let engine = engine.lock().map_err(|e| format!("Lock error: {}", e))?;
+    engine.get_state()
+}
+
+
+// ---------------------------------------------------------------------------
+// Session database commands
+// ---------------------------------------------------------------------------
+
+use crate::session_db::{DbMessage, SessionRecord, SessionSummary, SharedDbWriter};
+
+/// Creates a new session record in the database.
+#[tauri::command]
+pub fn db_create_session(
+    session_id: String,
+    preset_id: Option<String>,
+    notes: Option<String>,
+    db: State<'_, SharedDbWriter>,
+) -> Result<(), String> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
+    let db = db.lock().map_err(|e| format!("Lock error: {}", e))?;
+    db.send(DbMessage::CreateSession(SessionRecord {
+        id: session_id,
+        started_at: now,
+        ended_at: None,
+        preset_id,
+        notes,
+    }))
+}
+
+/// Ends a session (sets ended_at timestamp and flushes pending data).
+#[tauri::command]
+pub fn db_end_session(
+    session_id: String,
+    db: State<'_, SharedDbWriter>,
+) -> Result<(), String> {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+
+    let db = db.lock().map_err(|e| format!("Lock error: {}", e))?;
+    db.send(DbMessage::EndSession {
+        session_id,
+        ended_at: now,
+    })
+}
+
+/// Pushes a biometric sample to the database writer (buffered, non-blocking).
+#[tauri::command]
+pub fn db_push_sample(
+    session_id: String,
+    sample: crate::closed_loop::BiometricSample,
+    db: State<'_, SharedDbWriter>,
+) -> Result<(), String> {
+    let db = db.lock().map_err(|e| format!("Lock error: {}", e))?;
+    db.send(DbMessage::PushSample { session_id, sample })
+}
+
+/// Records a threshold violation event in the database.
+#[tauri::command]
+pub fn db_push_event(
+    session_id: String,
+    violation: crate::closed_loop::ThresholdViolation,
+    db: State<'_, SharedDbWriter>,
+) -> Result<(), String> {
+    let db = db.lock().map_err(|e| format!("Lock error: {}", e))?;
+    db.send(DbMessage::PushEvent {
+        session_id,
+        violation,
+    })
+}
+
+/// Forces a flush of buffered samples to disk.
+#[tauri::command]
+pub fn db_flush(db: State<'_, SharedDbWriter>) -> Result<(), String> {
+    let db = db.lock().map_err(|e| format!("Lock error: {}", e))?;
+    db.send(DbMessage::Flush)
+}
+
+/// Lists all sessions with summary info (sample count, event count).
+///
+/// This reads directly from SQLite (read path is separate from write path).
+#[tauri::command]
+pub fn db_list_sessions(db_path: State<'_, DbPath>) -> Result<Vec<SessionSummary>, String> {
+    let conn = rusqlite::Connection::open(&db_path.0)
+        .map_err(|e| format!("DB open error: {}", e))?;
+
+    let mut stmt = conn
+        .prepare(
+            "SELECT s.id, s.started_at, s.ended_at, s.preset_id, s.notes,
+                    COALESCE(sc.cnt, 0) AS sample_count,
+                    COALESCE(ec.cnt, 0) AS event_count
+             FROM sessions s
+             LEFT JOIN (SELECT session_id, COUNT(*) AS cnt FROM biometric_samples GROUP BY session_id) sc
+               ON sc.session_id = s.id
+             LEFT JOIN (SELECT session_id, COUNT(*) AS cnt FROM threshold_events GROUP BY session_id) ec
+               ON ec.session_id = s.id
+             ORDER BY s.started_at DESC",
+        )
+        .map_err(|e| format!("Prepare error: {}", e))?;
+
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(SessionSummary {
+                id: row.get(0)?,
+                started_at: row.get(1)?,
+                ended_at: row.get(2)?,
+                preset_id: row.get(3)?,
+                notes: row.get(4)?,
+                sample_count: row.get(5)?,
+                event_count: row.get(6)?,
+            })
+        })
+        .map_err(|e| format!("Query error: {}", e))?;
+
+    let mut sessions = Vec::new();
+    for row in rows {
+        sessions.push(row.map_err(|e| format!("Row error: {}", e))?);
+    }
+    Ok(sessions)
+}
+
+/// Wrapper to hold the DB path for read-only queries.
+pub struct DbPath(pub std::path::PathBuf);
+
+
+// ---------------------------------------------------------------------------
+// Audio engine commands
+// ---------------------------------------------------------------------------
+
+use crate::audio_engine::{AudioMessage, AudioState, SharedAudioEngine};
+
+/// Starts audio playback (binaural tones).
+#[tauri::command]
+pub fn audio_play(engine: State<'_, SharedAudioEngine>) -> Result<(), String> {
+    let engine = engine.lock().map_err(|e| format!("Lock error: {}", e))?;
+    engine.send(AudioMessage::Play)
+}
+
+/// Stops audio playback with fade-out.
+#[tauri::command]
+pub fn audio_stop(engine: State<'_, SharedAudioEngine>) -> Result<(), String> {
+    let engine = engine.lock().map_err(|e| format!("Lock error: {}", e))?;
+    engine.send(AudioMessage::Stop)
+}
+
+/// Sets the master volume (0.0–1.0).
+#[tauri::command]
+pub fn audio_set_volume(volume: f32, engine: State<'_, SharedAudioEngine>) -> Result<(), String> {
+    let engine = engine.lock().map_err(|e| format!("Lock error: {}", e))?;
+    engine.send(AudioMessage::SetVolume(volume))
+}
+
+/// Sets the base frequency and binaural beat offset.
+#[tauri::command]
+pub fn audio_set_frequencies(
+    base_freq: f32,
+    binaural_offset: f32,
+    engine: State<'_, SharedAudioEngine>,
+) -> Result<(), String> {
+    let engine = engine.lock().map_err(|e| format!("Lock error: {}", e))?;
+    engine.send(AudioMessage::SetFrequencies {
+        base_freq,
+        binaural_offset,
+    })
+}
+
+/// Returns the current audio engine state.
+#[tauri::command]
+pub fn audio_get_state(engine: State<'_, SharedAudioEngine>) -> Result<AudioState, String> {
+    let engine = engine.lock().map_err(|e| format!("Lock error: {}", e))?;
+    engine.get_state()
 }

@@ -2,10 +2,15 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod adc_driver;
+mod audio_engine;
+mod closed_loop;
 mod commands;
 mod i2c_driver;
 mod serial_port;
+mod session_db;
 mod spi_driver;
+
+use tauri::Manager;
 
 fn main() {
     // Create shared serial port state (initially no connection)
@@ -19,6 +24,30 @@ fn main() {
     let shared_spi = spi_driver::create_shared_spi();
 
     tauri::Builder::default()
+        .setup(|app| {
+            // Resolve the app data directory for the SQLite database
+            let app_data = app
+                .path()
+                .app_data_dir()
+                .expect("Failed to resolve app data dir");
+            std::fs::create_dir_all(&app_data).ok();
+            let db_path = app_data.join("sessions.db");
+
+            // Start the SQLite writer thread
+            let db_writer = session_db::start_db_writer(db_path.clone());
+            app.manage(db_writer);
+            app.manage(commands::DbPath(db_path));
+
+            // Start the closed-loop biometric control engine
+            let closed_loop = closed_loop::start_closed_loop(app.handle().clone());
+            app.manage(closed_loop);
+
+            // Start the audio engine
+            let audio = audio_engine::start_audio_engine();
+            app.manage(audio);
+
+            Ok(())
+        })
         .manage(shared_port)
         .manage(shared_adc)
         .manage(shared_i2c)
@@ -48,6 +77,25 @@ fn main() {
             commands::spi_read,
             commands::start_spi_continuous,
             commands::stop_spi_continuous,
+            // Closed-loop biometric commands
+            commands::push_biometric_sample,
+            commands::update_thresholds,
+            commands::start_biometric_session,
+            commands::stop_biometric_session,
+            commands::get_closed_loop_state,
+            // Session database commands
+            commands::db_create_session,
+            commands::db_end_session,
+            commands::db_push_sample,
+            commands::db_push_event,
+            commands::db_flush,
+            commands::db_list_sessions,
+            // Audio engine commands
+            commands::audio_play,
+            commands::audio_stop,
+            commands::audio_set_volume,
+            commands::audio_set_frequencies,
+            commands::audio_get_state,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

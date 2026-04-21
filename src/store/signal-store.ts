@@ -5,7 +5,7 @@
 
 import { create } from 'zustand';
 
-export type SignalUnit = '°C' | 'V' | 'A' | 'Pa' | 'dB' | '%' | 'rpm';
+export type SignalUnit = '°C' | 'V' | 'A' | 'Pa' | 'dB' | '%' | 'rpm' | 'bpm' | 'µV' | 'µS' | 'SpO2';
 
 export interface SignalSample {
   timestamp: number;

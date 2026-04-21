@@ -12,6 +12,7 @@ import type { IHardwarePort } from './communication/hardware-port';
 import { useSignalStore } from './store/signal-store';
 import { useAuthStore } from './store/auth-store';
 import { usePresetStore } from './store/preset-store';
+import { useBiometricStore } from './store/biometric-store';
 import AuthGate from './components/AuthGate';
 import PinDialog, { type PinDialogMode } from './components/PinDialog';
 import DeviceList from './components/DeviceList';
@@ -243,6 +244,52 @@ function seedSignalChannels() {
     thresholdMax: 800,
     samples: [],
   });
+  // Biometric channels — sensory deprivation tank
+  store.addChannel({
+    id: 'bio-eeg-alpha',
+    name: 'EEG Alpha',
+    unit: 'µV',
+    sampleRateHz: 10,
+    thresholdMin: 5,
+    thresholdMax: 50,
+    samples: [],
+  });
+  store.addChannel({
+    id: 'bio-pulse',
+    name: 'Pulso Cardíaco',
+    unit: 'bpm',
+    sampleRateHz: 2,
+    thresholdMin: 50,
+    thresholdMax: 100,
+    samples: [],
+  });
+  store.addChannel({
+    id: 'bio-temp',
+    name: 'Temp. Corporal',
+    unit: '°C',
+    sampleRateHz: 1,
+    thresholdMin: 35.5,
+    thresholdMax: 37.5,
+    samples: [],
+  });
+  store.addChannel({
+    id: 'bio-gsr',
+    name: 'GSR (Conductancia)',
+    unit: 'µS',
+    sampleRateHz: 2,
+    thresholdMin: 0.5,
+    thresholdMax: 15,
+    samples: [],
+  });
+  store.addChannel({
+    id: 'bio-spo2',
+    name: 'SpO2',
+    unit: 'SpO2',
+    sampleRateHz: 1,
+    thresholdMin: 94,
+    thresholdMax: 100,
+    samples: [],
+  });
 }
 
 function startSignalSimulation(): ReturnType<typeof setInterval> {
@@ -274,5 +321,52 @@ function startSignalSimulation(): ReturnType<typeof setInterval> {
       timestamp: now,
       value: parseFloat((0.2 + loadFactor * 1.5 + 0.5 * Math.sin(tick * 0.12) + (Math.random() - 0.5) * 0.1).toFixed(3)),
     });
+
+    // --- Biometric simulation ---
+    // EEG Alpha: simulates gradual relaxation over time (increases slowly)
+    const relaxPhase = Math.min(tick * 0.002, 1); // 0→1 over ~500 ticks
+    const alphaBase = 10 + relaxPhase * 25; // 10→35 µV as session progresses
+    store.pushSample('bio-eeg-alpha', {
+      timestamp: now,
+      value: parseFloat((alphaBase + 5 * Math.sin(tick * 0.03) + (Math.random() - 0.5) * 3).toFixed(1)),
+    });
+
+    // Pulse: starts ~75 bpm, gradually decreases to ~60 as relaxation deepens
+    const pulseBase = 75 - relaxPhase * 15;
+    store.pushSample('bio-pulse', {
+      timestamp: now,
+      value: parseFloat((pulseBase + 3 * Math.sin(tick * 0.04) + (Math.random() - 0.5) * 2).toFixed(0)),
+    });
+
+    // Body temperature: stable around 36.5°C with tiny drift
+    store.pushSample('bio-temp', {
+      timestamp: now,
+      value: parseFloat((36.5 + 0.3 * Math.sin(tick * 0.01) + (Math.random() - 0.5) * 0.1).toFixed(1)),
+    });
+
+    // GSR: decreases as relaxation deepens (less skin conductance)
+    const gsrBase = 8 - relaxPhase * 4; // 8→4 µS
+    store.pushSample('bio-gsr', {
+      timestamp: now,
+      value: parseFloat((gsrBase + 1.5 * Math.sin(tick * 0.06) + (Math.random() - 0.5) * 0.5).toFixed(2)),
+    });
+
+    // SpO2: stable 96-99%
+    store.pushSample('bio-spo2', {
+      timestamp: now,
+      value: parseFloat((97.5 + Math.sin(tick * 0.02) + (Math.random() - 0.5) * 0.5).toFixed(1)),
+    });
+
+    // Update biometric store with simulated EEG bands
+    const bioStore = useBiometricStore.getState();
+    bioStore.setLatestEegBands({
+      delta: parseFloat((5 + relaxPhase * 10 + (Math.random() - 0.5) * 2).toFixed(1)),
+      theta: parseFloat((8 + relaxPhase * 12 + (Math.random() - 0.5) * 2).toFixed(1)),
+      alpha: parseFloat((alphaBase + (Math.random() - 0.5) * 3).toFixed(1)),
+      beta: parseFloat((15 - relaxPhase * 8 + (Math.random() - 0.5) * 2).toFixed(1)),
+      gamma: parseFloat((5 - relaxPhase * 3 + (Math.random() - 0.5) * 1).toFixed(1)),
+    });
+    // Simulate relaxation score
+    bioStore.setRelaxationScore(parseFloat((relaxPhase * 80 + (Math.random() - 0.5) * 10).toFixed(0)));
   }, 500);
 }
