@@ -78,6 +78,7 @@ fn main() {
             commands::start_spi_continuous,
             commands::stop_spi_continuous,
             // Closed-loop biometric commands
+            commands::push_biometric_batch,
             commands::push_biometric_sample,
             commands::update_thresholds,
             commands::start_biometric_session,

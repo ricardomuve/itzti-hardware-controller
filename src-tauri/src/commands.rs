@@ -315,15 +315,25 @@ use crate::closed_loop::{
     BiometricSample, BiometricThreshold, ClosedLoopState, ControlMessage, SharedClosedLoop,
 };
 
-/// Pushes a biometric sample into the closed-loop engine.
+/// Pushes a batch of biometric samples into the closed-loop engine.
+/// This is the preferred ingestion path — reduces IPC overhead from
+/// 1 invoke per sample to 1 invoke per batch (e.g. 50 samples at once).
 ///
-/// Called from the frontend when sensor data arrives (via serial/I2C/mock).
+/// Lock-free: SharedClosedLoop is Arc<Engine>, send() uses mpsc directly.
+#[tauri::command]
+pub fn push_biometric_batch(
+    samples: Vec<BiometricSample>,
+    engine: State<'_, SharedClosedLoop>,
+) -> Result<(), String> {
+    engine.send(ControlMessage::SampleBatch(samples))
+}
+
+/// Pushes a single biometric sample (backward compat, prefer batch).
 #[tauri::command]
 pub fn push_biometric_sample(
     sample: BiometricSample,
     engine: State<'_, SharedClosedLoop>,
 ) -> Result<(), String> {
-    let engine = engine.lock().map_err(|e| format!("Lock error: {}", e))?;
     engine.send(ControlMessage::Sample(sample))
 }
 
@@ -333,7 +343,6 @@ pub fn update_thresholds(
     thresholds: Vec<BiometricThreshold>,
     engine: State<'_, SharedClosedLoop>,
 ) -> Result<(), String> {
-    let engine = engine.lock().map_err(|e| format!("Lock error: {}", e))?;
     engine.send(ControlMessage::UpdateThresholds(thresholds))
 }
 
@@ -343,7 +352,6 @@ pub fn start_biometric_session(
     session_id: String,
     engine: State<'_, SharedClosedLoop>,
 ) -> Result<(), String> {
-    let engine = engine.lock().map_err(|e| format!("Lock error: {}", e))?;
     engine.send(ControlMessage::StartSession { session_id })
 }
 
@@ -352,7 +360,6 @@ pub fn start_biometric_session(
 pub fn stop_biometric_session(
     engine: State<'_, SharedClosedLoop>,
 ) -> Result<(), String> {
-    let engine = engine.lock().map_err(|e| format!("Lock error: {}", e))?;
     engine.send(ControlMessage::StopSession)
 }
 
@@ -361,7 +368,6 @@ pub fn stop_biometric_session(
 pub fn get_closed_loop_state(
     engine: State<'_, SharedClosedLoop>,
 ) -> Result<ClosedLoopState, String> {
-    let engine = engine.lock().map_err(|e| format!("Lock error: {}", e))?;
     engine.get_state()
 }
 

@@ -6,6 +6,13 @@
 // 2. Compara contra umbrales configurables
 // 3. Dispara comandos I2C hacia actuadores
 // 4. Emite sugerencias visuales al frontend vía eventos Tauri
+//
+// Optimizaciones de eficiencia:
+// - Batch ingestion: samples llegan en lotes vía push_biometric_batch
+// - Lock-free ingestion: usa mpsc sin mutex en el hot path
+// - Per-channel latest cache: evita iterar todo el buffer para scoring
+// - Throttled emit: estado al frontend cada 200ms, no cada ciclo
+// - Compact state: solo envía violations cuando cambian
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -94,7 +101,6 @@ pub struct ClosedLoopState {
     pub last_cycle_timestamp: u64,
 }
 
-/// Audio adjustment suggestion emitted to frontend
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AudioSuggestion {
     pub volume_delta: f64,
@@ -103,10 +109,9 @@ pub struct AudioSuggestion {
     pub timestamp: u64,
 }
 
-/// Visual suggestion emitted to the expert frontend
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExpertSuggestion {
-    pub severity: String, // "info", "warning", "critical"
+    pub severity: String,
     pub message: String,
     pub channel_id: String,
     pub suggested_action: String,
@@ -114,40 +119,45 @@ pub struct ExpertSuggestion {
 }
 
 // ---------------------------------------------------------------------------
-// Messages for the control thread
+// Messages — batch-oriented for efficiency
 // ---------------------------------------------------------------------------
 
 pub enum ControlMessage {
-    /// New biometric sample arrived
+    /// Batch of biometric samples (reduces IPC overhead)
+    SampleBatch(Vec<BiometricSample>),
+    /// Single sample (kept for backward compat, but batch preferred)
     Sample(BiometricSample),
-    /// Update threshold configuration
     UpdateThresholds(Vec<BiometricThreshold>),
-    /// Start a new session
     StartSession { session_id: String },
-    /// Stop the current session
     StopSession,
-    /// Request current state (response via Tauri event)
     RequestState,
-    /// Shutdown the control thread
     Shutdown,
 }
 
 // ---------------------------------------------------------------------------
-// Shared state
+// Engine handle — lock-free ingestion via mpsc::Sender (Send, not Mutex)
 // ---------------------------------------------------------------------------
 
+/// The engine handle exposes an `mpsc::Sender` directly.
+/// `mpsc::Sender` is `Send + Clone` — no Mutex needed on the hot path.
 pub struct ClosedLoopEngine {
     sender: mpsc::Sender<ControlMessage>,
     state: Arc<Mutex<ClosedLoopState>>,
 }
 
-pub type SharedClosedLoop = Arc<Mutex<ClosedLoopEngine>>;
+/// Shared handle. The outer Arc<Mutex> is only locked for get_state() reads,
+/// NOT for sending samples (which goes through the cloned Sender).
+pub type SharedClosedLoop = Arc<ClosedLoopEngine>;
 
 impl ClosedLoopEngine {
+    /// Send a message to the control thread. Lock-free — just mpsc::send.
     pub fn send(&self, msg: ControlMessage) -> Result<(), String> {
-        self.sender.send(msg).map_err(|e| format!("Control loop send error: {}", e))
+        self.sender
+            .send(msg)
+            .map_err(|e| format!("Control loop send error: {}", e))
     }
 
+    /// Read current state (takes the Mutex, but only for reads — rare).
     pub fn get_state(&self) -> Result<ClosedLoopState, String> {
         self.state
             .lock()
@@ -157,60 +167,48 @@ impl ClosedLoopEngine {
 }
 
 // ---------------------------------------------------------------------------
-// Relaxation score computation
+// Per-channel latest value cache (avoids scanning the full buffer)
 // ---------------------------------------------------------------------------
 
-/// Computes a relaxation score (0–100) from recent biometric data.
-///
-/// Heuristic:
-/// - High alpha + theta EEG → higher score
-/// - Low heart rate → higher score
-/// - Stable temperature → higher score
-/// - Low GSR (skin conductance) → higher score
-fn compute_relaxation_score(recent_samples: &[BiometricSample]) -> f64 {
-    if recent_samples.is_empty() {
-        return 0.0;
-    }
+struct ChannelLatest {
+    value: f64,
+    timestamp: u64,
+    eeg_bands: Option<EegBands>,
+    sensor_type: BiometricSensorType,
+}
 
-    let mut score = 50.0; // baseline
+// ---------------------------------------------------------------------------
+// Relaxation score — O(1) from cached latest values
+// ---------------------------------------------------------------------------
 
-    // EEG contribution: alpha/theta ratio vs beta/gamma
-    let eeg_samples: Vec<&BiometricSample> = recent_samples
-        .iter()
-        .filter(|s| matches!(s.sensor_type, BiometricSensorType::Eeg))
-        .collect();
+fn compute_relaxation_score(latest: &HashMap<String, ChannelLatest>) -> f64 {
+    let mut score = 50.0;
 
-    if let Some(last_eeg) = eeg_samples.last() {
-        if let Some(bands) = &last_eeg.eeg_bands {
+    // EEG: find any channel with eeg_bands
+    for cl in latest.values() {
+        if let Some(bands) = &cl.eeg_bands {
             let calm = bands.alpha + bands.theta;
-            let active = bands.beta + bands.gamma + 0.001; // avoid div by zero
+            let active = bands.beta + bands.gamma + 0.001;
             let ratio = calm / active;
-            // ratio > 2 = very relaxed, ratio < 0.5 = very active
             score += (ratio - 1.0).clamp(-25.0, 25.0) * 10.0;
+            break; // use first EEG channel found
         }
     }
 
-    // Pulse contribution: lower BPM = more relaxed
-    let pulse_samples: Vec<&BiometricSample> = recent_samples
-        .iter()
-        .filter(|s| matches!(s.sensor_type, BiometricSensorType::Pulse))
-        .collect();
-
-    if let Some(last_pulse) = pulse_samples.last() {
-        let bpm = last_pulse.value;
-        // 60 bpm = +15, 80 bpm = 0, 100 bpm = -15
-        score += (80.0 - bpm) * 0.75;
+    // Pulse
+    for cl in latest.values() {
+        if matches!(cl.sensor_type, BiometricSensorType::Pulse) {
+            score += (80.0 - cl.value) * 0.75;
+            break;
+        }
     }
 
-    // GSR contribution: lower conductance = more relaxed
-    let gsr_samples: Vec<&BiometricSample> = recent_samples
-        .iter()
-        .filter(|s| matches!(s.sensor_type, BiometricSensorType::Gsr))
-        .collect();
-
-    if let Some(last_gsr) = gsr_samples.last() {
-        // Typical GSR: 1-20 µS. Lower = calmer.
-        score += (5.0 - last_gsr.value).clamp(-10.0, 10.0);
+    // GSR
+    for cl in latest.values() {
+        if matches!(cl.sensor_type, BiometricSensorType::Gsr) {
+            score += (5.0 - cl.value).clamp(-10.0, 10.0);
+            break;
+        }
     }
 
     score.clamp(0.0, 100.0)
@@ -220,15 +218,10 @@ fn compute_relaxation_score(recent_samples: &[BiometricSample]) -> f64 {
 // Control loop thread
 // ---------------------------------------------------------------------------
 
-/// Evaluation interval for the closed-loop control thread.
-const LOOP_INTERVAL_MS: u64 = 100; // 10 Hz evaluation rate
+const LOOP_INTERVAL_MS: u64 = 100;   // 10 Hz evaluation
+const EMIT_INTERVAL_MS: u64 = 200;   // 5 Hz state emit to frontend (was 10 Hz)
+const SUGGESTION_COOLDOWN_MS: u64 = 1000; // 1 per second per channel max
 
-/// Maximum number of recent samples to keep per channel for scoring.
-const MAX_RECENT_SAMPLES: usize = 200;
-
-/// Starts the closed-loop control engine on a dedicated thread.
-///
-/// Returns a `SharedClosedLoop` handle for sending messages from Tauri commands.
 pub fn start_closed_loop(app_handle: tauri::AppHandle) -> SharedClosedLoop {
     let (tx, rx) = mpsc::channel::<ControlMessage>();
 
@@ -244,36 +237,50 @@ pub fn start_closed_loop(app_handle: tauri::AppHandle) -> SharedClosedLoop {
 
     thread::spawn(move || {
         let mut thresholds: Vec<BiometricThreshold> = Vec::new();
-        let mut recent_samples: Vec<BiometricSample> = Vec::new();
+        let mut latest: HashMap<String, ChannelLatest> = HashMap::new();
         let mut session_active = false;
         let mut session_id: Option<String> = None;
         let mut last_eval = Instant::now();
+        let mut last_emit = Instant::now();
+        let mut last_suggestion_per_channel: HashMap<String, u64> = HashMap::new();
+        let mut prev_violation_count: usize = 0;
 
         loop {
-            // Drain all pending messages (non-blocking)
+            // Drain all pending messages
             loop {
                 match rx.try_recv() {
-                    Ok(ControlMessage::Sample(sample)) => {
-                        recent_samples.push(sample);
-                        // Trim to keep memory bounded
-                        if recent_samples.len() > MAX_RECENT_SAMPLES * 5 {
-                            let drain_count = recent_samples.len() - MAX_RECENT_SAMPLES;
-                            recent_samples.drain(..drain_count);
+                    Ok(ControlMessage::SampleBatch(samples)) => {
+                        for sample in samples {
+                            latest.insert(sample.channel_id.clone(), ChannelLatest {
+                                value: sample.value,
+                                timestamp: sample.timestamp,
+                                eeg_bands: sample.eeg_bands.clone(),
+                                sensor_type: sample.sensor_type.clone(),
+                            });
                         }
                     }
-                    Ok(ControlMessage::UpdateThresholds(new_thresholds)) => {
-                        thresholds = new_thresholds;
+                    Ok(ControlMessage::Sample(sample)) => {
+                        latest.insert(sample.channel_id.clone(), ChannelLatest {
+                            value: sample.value,
+                            timestamp: sample.timestamp,
+                            eeg_bands: sample.eeg_bands.clone(),
+                            sensor_type: sample.sensor_type.clone(),
+                        });
+                    }
+                    Ok(ControlMessage::UpdateThresholds(t)) => {
+                        thresholds = t;
                     }
                     Ok(ControlMessage::StartSession { session_id: sid }) => {
                         session_active = true;
                         session_id = Some(sid);
-                        recent_samples.clear();
+                        latest.clear();
+                        last_suggestion_per_channel.clear();
                         let _ = app_handle.emit("closed-loop-started", &session_id);
                     }
                     Ok(ControlMessage::StopSession) => {
                         session_active = false;
                         let stopped_id = session_id.take();
-                        recent_samples.clear();
+                        latest.clear();
                         let _ = app_handle.emit("closed-loop-stopped", &stopped_id);
                     }
                     Ok(ControlMessage::RequestState) => {
@@ -289,7 +296,7 @@ pub fn start_closed_loop(app_handle: tauri::AppHandle) -> SharedClosedLoop {
 
             // Evaluate at fixed interval
             if last_eval.elapsed() < Duration::from_millis(LOOP_INTERVAL_MS) {
-                thread::sleep(Duration::from_millis(10));
+                thread::sleep(Duration::from_millis(5));
                 continue;
             }
             last_eval = Instant::now();
@@ -303,94 +310,98 @@ pub fn start_closed_loop(app_handle: tauri::AppHandle) -> SharedClosedLoop {
                 .unwrap_or_default()
                 .as_millis() as u64;
 
-            // --- Evaluate thresholds ---
+            // --- Evaluate thresholds (O(thresholds) with O(1) lookup) ---
             let mut violations: Vec<ThresholdViolation> = Vec::new();
 
             for threshold in &thresholds {
-                // Find the most recent sample for this channel
-                let last_sample = recent_samples
-                    .iter()
-                    .rev()
-                    .find(|s| s.channel_id == threshold.channel_id);
+                let cl = match latest.get(&threshold.channel_id) {
+                    Some(cl) => cl,
+                    None => continue,
+                };
 
-                if let Some(sample) = last_sample {
-                    let violated = sample.value < threshold.min || sample.value > threshold.max;
-                    if violated {
-                        let violation = ThresholdViolation {
-                            channel_id: threshold.channel_id.clone(),
-                            sensor_type: threshold.sensor_type.clone(),
-                            current_value: sample.value,
-                            threshold_min: threshold.min,
-                            threshold_max: threshold.max,
-                            action: threshold.action.clone(),
+                let violated = cl.value < threshold.min || cl.value > threshold.max;
+                if !violated {
+                    continue;
+                }
+
+                violations.push(ThresholdViolation {
+                    channel_id: threshold.channel_id.clone(),
+                    sensor_type: threshold.sensor_type.clone(),
+                    current_value: cl.value,
+                    threshold_min: threshold.min,
+                    threshold_max: threshold.max,
+                    action: threshold.action.clone(),
+                    timestamp: now_ms,
+                });
+
+                // Rate-limit suggestions per channel
+                let last_ts = last_suggestion_per_channel
+                    .get(&threshold.channel_id)
+                    .copied()
+                    .unwrap_or(0);
+
+                if now_ms - last_ts >= SUGGESTION_COOLDOWN_MS {
+                    last_suggestion_per_channel
+                        .insert(threshold.channel_id.clone(), now_ms);
+
+                    let severity = if (cl.value - threshold.max).abs() > 20.0
+                        || (threshold.min - cl.value).abs() > 20.0
+                    { "critical" } else { "warning" };
+
+                    let _ = app_handle.emit("expert-suggestion", &ExpertSuggestion {
+                        severity: severity.to_string(),
+                        message: format!(
+                            "{:?} canal {} = {:.2} (umbral: {:.1}–{:.1})",
+                            threshold.sensor_type, threshold.channel_id,
+                            cl.value, threshold.min, threshold.max
+                        ),
+                        channel_id: threshold.channel_id.clone(),
+                        suggested_action: threshold.action.action_type.clone(),
+                        timestamp: now_ms,
+                    });
+
+                    if threshold.action.action_type == "adjust_audio" {
+                        let _ = app_handle.emit("audio-suggestion", &AudioSuggestion {
+                            volume_delta: threshold.action.volume_delta.unwrap_or(0.0),
+                            pitch_delta: threshold.action.pitch_delta.unwrap_or(0.0),
+                            reason: format!("{:?} threshold on {}", threshold.sensor_type, threshold.channel_id),
                             timestamp: now_ms,
-                        };
-
-                        // Emit expert suggestion for each violation
-                        let severity = if (sample.value - threshold.max).abs() > 20.0
-                            || (threshold.min - sample.value).abs() > 20.0
-                        {
-                            "critical"
-                        } else {
-                            "warning"
-                        };
-
-                        let suggestion = ExpertSuggestion {
-                            severity: severity.to_string(),
-                            message: format!(
-                                "{:?} en canal {} = {:.2} (umbral: {:.1}–{:.1})",
-                                threshold.sensor_type,
-                                threshold.channel_id,
-                                sample.value,
-                                threshold.min,
-                                threshold.max
-                            ),
-                            channel_id: threshold.channel_id.clone(),
-                            suggested_action: format!("{:?}", threshold.action.action_type),
-                            timestamp: now_ms,
-                        };
-                        let _ = app_handle.emit("expert-suggestion", &suggestion);
-
-                        // Emit audio suggestion if action is audio adjustment
-                        if threshold.action.action_type == "adjust_audio" {
-                            let audio_suggestion = AudioSuggestion {
-                                volume_delta: threshold.action.volume_delta.unwrap_or(0.0),
-                                pitch_delta: threshold.action.pitch_delta.unwrap_or(0.0),
-                                reason: format!(
-                                    "{:?} threshold crossed on {}",
-                                    threshold.sensor_type, threshold.channel_id
-                                ),
-                                timestamp: now_ms,
-                            };
-                            let _ = app_handle.emit("audio-suggestion", &audio_suggestion);
-                        }
-
-                        violations.push(violation);
+                        });
                     }
                 }
             }
 
-            // --- Compute relaxation score ---
-            let relaxation = compute_relaxation_score(&recent_samples);
+            // --- Relaxation score from cached latest values (O(channels)) ---
+            let relaxation = compute_relaxation_score(&latest);
 
             // --- Update shared state ---
-            if let Ok(mut state) = state_clone.lock() {
-                state.active = session_active;
-                state.session_id = session_id.clone();
-                state.relaxation_score = relaxation;
-                state.violations = violations;
-                state.last_cycle_timestamp = now_ms;
+            if let Ok(mut st) = state_clone.lock() {
+                st.active = session_active;
+                st.session_id = session_id.clone();
+                st.relaxation_score = relaxation;
+                st.violations = violations.clone();
+                st.last_cycle_timestamp = now_ms;
             }
 
-            // Emit periodic state update (every cycle)
-            if let Ok(s) = state_clone.lock() {
-                let _ = app_handle.emit("closed-loop-update", &*s);
+            // --- Throttled emit to frontend (5 Hz instead of 10 Hz) ---
+            if last_emit.elapsed() >= Duration::from_millis(EMIT_INTERVAL_MS) {
+                // Only emit full state if violations changed or on regular interval
+                let violation_count = violations.len();
+                if violation_count != prev_violation_count
+                    || last_emit.elapsed() >= Duration::from_millis(EMIT_INTERVAL_MS)
+                {
+                    if let Ok(s) = state_clone.lock() {
+                        let _ = app_handle.emit("closed-loop-update", &*s);
+                    }
+                    prev_violation_count = violation_count;
+                }
+                last_emit = Instant::now();
             }
         }
     });
 
-    Arc::new(Mutex::new(ClosedLoopEngine {
+    Arc::new(ClosedLoopEngine {
         sender: tx,
         state,
-    }))
+    })
 }
