@@ -13,6 +13,10 @@
  *   0x06 = ToggleLight      payload: [1 byte: 0=off, 1=on]
  *   0x10 = ScanPorts        payload: vacío
  *   0x11 = Disconnect       payload: vacío
+ *   0xF0 = Heartbeat        payload: [4 bytes: timestamp uint32] — watchdog keepalive
+ *   0xF1 = EnterSafeMode    payload: vacío — force safe mode
+ *   0xF2 = ExitSafeMode     payload: vacío — resume normal operation
+ *   0xFE = SafeModeAck      payload: [1 byte: reason] — MCU confirms safe mode entry
  */
 
 export enum CommandType {
@@ -24,6 +28,11 @@ export enum CommandType {
   ToggleLight = 0x06,
   ScanPorts = 0x10,
   Disconnect = 0x11,
+  // Watchdog / Safe Mode
+  Heartbeat = 0xf0,
+  EnterSafeMode = 0xf1,
+  ExitSafeMode = 0xf2,
+  SafeModeAck = 0xfe,
 }
 
 export interface HardwareCommand {
@@ -36,6 +45,34 @@ export interface PortInfo {
   manufacturer?: string;
   productId?: string;
   vendorId?: string;
+}
+
+// --- Watchdog / Safe Mode ---
+
+/** Reasons the MCU can enter safe mode */
+export enum SafeModeReason {
+  /** No heartbeat received within watchdog timeout */
+  WatchdogTimeout = 0x01,
+  /** Explicit command from the app */
+  ManualTrigger = 0x02,
+  /** MCU detected a hardware fault */
+  HardwareFault = 0x03,
+  /** Over-temperature protection */
+  OverTemperature = 0x04,
+}
+
+/** Current watchdog/safe-mode state tracked by the app */
+export interface WatchdogState {
+  /** Whether the heartbeat sender is active */
+  heartbeatActive: boolean;
+  /** Whether the MCU has reported safe mode */
+  mcuInSafeMode: boolean;
+  /** Reason for safe mode (if active) */
+  safeModeReason: SafeModeReason | null;
+  /** Timestamp of last successful heartbeat ACK */
+  lastHeartbeatAck: number;
+  /** Number of consecutive missed heartbeats */
+  missedHeartbeats: number;
 }
 
 

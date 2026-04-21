@@ -9,6 +9,7 @@ mod i2c_driver;
 mod serial_port;
 mod session_db;
 mod spi_driver;
+mod watchdog;
 
 use tauri::Manager;
 
@@ -45,6 +46,13 @@ fn main() {
             // Start the audio engine
             let audio = audio_engine::start_audio_engine();
             app.manage(audio);
+
+            // Start the watchdog / safe mode manager
+            let watchdog = watchdog::start_watchdog(
+                shared_port.clone(),
+                app.handle().clone(),
+            );
+            app.manage(watchdog);
 
             Ok(())
         })
@@ -97,6 +105,12 @@ fn main() {
             commands::audio_set_volume,
             commands::audio_set_frequencies,
             commands::audio_get_state,
+            // Watchdog / Safe Mode commands
+            commands::watchdog_start,
+            commands::watchdog_stop,
+            commands::watchdog_force_safe_mode,
+            commands::watchdog_exit_safe_mode,
+            commands::watchdog_get_state,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -125,6 +125,11 @@ function commandTypeToParamName(type: CommandType): string | null {
       return 'audioSource';
     case CommandType.ToggleLight:
       return 'lightOn';
+    case CommandType.Heartbeat:
+    case CommandType.EnterSafeMode:
+    case CommandType.ExitSafeMode:
+    case CommandType.SafeModeAck:
+      return null; // handled separately by watchdog
     default:
       return null;
   }

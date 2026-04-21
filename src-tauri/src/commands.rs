@@ -545,3 +545,41 @@ pub fn audio_get_state(engine: State<'_, SharedAudioEngine>) -> Result<AudioStat
     let engine = engine.lock().map_err(|e| format!("Lock error: {}", e))?;
     engine.get_state()
 }
+
+
+// ---------------------------------------------------------------------------
+// Watchdog / Safe Mode commands
+// ---------------------------------------------------------------------------
+
+use crate::watchdog::{SharedWatchdog, WatchdogMessage, WatchdogState};
+
+/// Starts the heartbeat sender. Call after connecting to the MCU.
+#[tauri::command]
+pub fn watchdog_start(engine: State<'_, SharedWatchdog>) -> Result<(), String> {
+    engine.send(WatchdogMessage::Start)
+}
+
+/// Stops the heartbeat sender. The MCU will enter safe mode after its
+/// watchdog timeout expires.
+#[tauri::command]
+pub fn watchdog_stop(engine: State<'_, SharedWatchdog>) -> Result<(), String> {
+    engine.send(WatchdogMessage::Stop)
+}
+
+/// Forces the MCU into safe mode immediately (sends EnterSafeMode command).
+#[tauri::command]
+pub fn watchdog_force_safe_mode(engine: State<'_, SharedWatchdog>) -> Result<(), String> {
+    engine.send(WatchdogMessage::ForceSafeMode)
+}
+
+/// Requests the MCU to exit safe mode and resume normal operation.
+#[tauri::command]
+pub fn watchdog_exit_safe_mode(engine: State<'_, SharedWatchdog>) -> Result<(), String> {
+    engine.send(WatchdogMessage::ExitSafeMode)
+}
+
+/// Returns the current watchdog state.
+#[tauri::command]
+pub fn watchdog_get_state(engine: State<'_, SharedWatchdog>) -> Result<WatchdogState, String> {
+    engine.get_state()
+}

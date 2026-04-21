@@ -25,6 +25,7 @@ import BiometricPanel from './BiometricPanel';
 import SessionControl from './SessionControl';
 import AudioControl from './AudioControl';
 import BiometricWaveform from './BiometricWaveform';
+import SafeModeIndicator from './SafeModeIndicator';
 
 export interface AuthGateProps {
   /** Optional callback when login/logout button is clicked */
@@ -54,6 +55,7 @@ export function getVisibleComponents(role: UserRole): Set<string> {
       'SessionControl',
       'AudioControl',
       'BiometricWaveform',
+      'SafeModeIndicator',
     ]);
   }
 
@@ -122,11 +124,12 @@ export default function AuthGate({ onLoginLogout }: AuthGateProps) {
             <BiometricWaveform />
           </section>
 
-          {/* Session control */}
+          {/* Session control + Audio + Watchdog */}
           <section data-testid="expert-session-control" className="bg-surface-alt rounded-xl border border-border p-5">
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
               <SessionControl />
               <AudioControl />
+              <SafeModeIndicator />
             </div>
           </section>
 
