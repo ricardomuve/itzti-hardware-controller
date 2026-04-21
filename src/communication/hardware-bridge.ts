@@ -80,9 +80,14 @@ export async function initBridge(): Promise<IHardwarePort> {
     const cmdType = paramNameToCommandType(paramName);
     if (cmdType !== null) {
       const payload = buildPayload(cmdType, value);
-      sendCommand(deviceId, { type: cmdType, payload }).catch(() => {
-        // Retry send failed — will be caught by timeout checker
-      });
+      // Stagger retries by 50ms to avoid serial buffer saturation
+      // when multiple CRITICAL params retry simultaneously
+      const delay = getRetryPriority(paramName) === 'critical' ? 0 : 50;
+      setTimeout(() => {
+        sendCommand(deviceId, { type: cmdType, payload }).catch(() => {
+          // Retry send failed — will be caught by timeout checker
+        });
+      }, delay);
     }
   });
 
@@ -98,6 +103,9 @@ export async function initBridge(): Promise<IHardwarePort> {
  * Sends a serialized command to the connected device via the hardware port.
  * Registers the command in the check-back store for ACK verification.
  *
+ * SAFETY: Blocks actuator commands when MCU is in safe mode.
+ * Only Heartbeat, EnterSafeMode, ExitSafeMode, and SafeModeAck are allowed through.
+ *
  * @param deviceId - Target device identifier
  * @param command - The HardwareCommand to serialize and send
  */
@@ -109,6 +117,21 @@ export async function sendCommand(
     throw new Error('No hay conexión activa con el dispositivo.');
   }
 
+  // SAFE MODE GUARD: block actuator commands during safe mode
+  const isControlCommand = command.type !== CommandType.Heartbeat
+    && command.type !== CommandType.EnterSafeMode
+    && command.type !== CommandType.ExitSafeMode
+    && command.type !== CommandType.SafeModeAck
+    && command.type !== CommandType.ScanPorts
+    && command.type !== CommandType.Disconnect;
+
+  if (isControlCommand && _safeModeActive) {
+    throw new Error(
+      `Comando ${CommandType[command.type]} bloqueado: MCU en modo seguro. ` +
+      'Los valores de safe_mode_defaults tienen prioridad absoluta.'
+    );
+  }
+
   // Register in check-back store before sending
   const paramName = commandTypeToParamName(command.type);
   if (paramName !== null && command.payload.length > 0) {
@@ -118,6 +141,14 @@ export async function sendCommand(
 
   const bytes = serialize(command);
   await port.write(bytes);
+}
+
+/** Safe mode flag — set by watchdog events, blocks actuator commands */
+let _safeModeActive = false;
+
+/** Called by the watchdog event listener to update the safe mode flag */
+export function setSafeModeActive(active: boolean): void {
+  _safeModeActive = active;
 }
 
 /**
@@ -203,4 +234,13 @@ function buildPayload(type: CommandType, value: number): number[] {
     default:
       return [];
   }
+}
+
+/** Returns retry priority based on safe-mode-defaults classification. */
+function getRetryPriority(paramName: string): 'critical' | 'high' | 'normal' {
+  const critical = ['lidLock', 'airPump', 'lightOn'];
+  const high = ['heater', 'actuatorSpeed', 'actuatorPos', 'uvSterilizer'];
+  if (critical.includes(paramName)) return 'critical';
+  if (high.includes(paramName)) return 'high';
+  return 'normal';
 }

@@ -12,6 +12,7 @@
 
 use rodio::{OutputStream, Sink, Source};
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -66,20 +67,21 @@ pub enum AudioMessage {
 
 /// A simple stereo binaural beat generator.
 /// Left channel: base_freq, Right channel: base_freq + offset
+/// Uses AtomicU32 for lock-free parameter reads at 88.2kHz sample rate.
 struct BinauralSource {
     sample_rate: u32,
     sample_idx: u64,
-    base_freq: Arc<Mutex<f32>>,
-    offset: Arc<Mutex<f32>>,
-    amplitude: Arc<Mutex<f32>>,
+    base_freq: Arc<AtomicU32>,
+    offset: Arc<AtomicU32>,
+    amplitude: Arc<AtomicU32>,
 }
 
 impl BinauralSource {
     fn new(
         sample_rate: u32,
-        base_freq: Arc<Mutex<f32>>,
-        offset: Arc<Mutex<f32>>,
-        amplitude: Arc<Mutex<f32>>,
+        base_freq: Arc<AtomicU32>,
+        offset: Arc<AtomicU32>,
+        amplitude: Arc<AtomicU32>,
     ) -> Self {
         Self {
             sample_rate,
@@ -91,25 +93,30 @@ impl BinauralSource {
     }
 }
 
+/// Helper: store f32 as AtomicU32 bits
+fn store_f32(atom: &AtomicU32, val: f32) {
+    atom.store(val.to_bits(), Ordering::Relaxed);
+}
+
+/// Helper: load f32 from AtomicU32 bits
+fn load_f32(atom: &AtomicU32) -> f32 {
+    f32::from_bits(atom.load(Ordering::Relaxed))
+}
+
 impl Iterator for BinauralSource {
     type Item = f32;
 
     fn next(&mut self) -> Option<f32> {
         let t = self.sample_idx as f64 / self.sample_rate as f64;
-        let base = *self.base_freq.lock().unwrap_or_else(|e| e.into_inner()) as f64;
-        let off = *self.offset.lock().unwrap_or_else(|e| e.into_inner()) as f64;
-        let amp = *self.amplitude.lock().unwrap_or_else(|e| e.into_inner()) as f64;
+        let base = load_f32(&self.base_freq) as f64;
+        let off = load_f32(&self.offset) as f64;
+        let amp = load_f32(&self.amplitude) as f64;
 
         // Stereo interleaved: even samples = left, odd = right
         let is_left = self.sample_idx % 2 == 0;
         let freq = if is_left { base } else { base + off };
 
-        // We advance time only on right channel (every 2 samples = 1 frame)
-        if !is_left {
-            self.sample_idx += 1;
-        } else {
-            self.sample_idx += 1;
-        }
+        self.sample_idx += 1;
 
         let value = amp * (2.0 * std::f64::consts::PI * freq * t).sin();
         Some(value as f32)
@@ -175,10 +182,10 @@ pub fn start_audio_engine() -> SharedAudioEngine {
     let state_clone = Arc::clone(&state);
 
     thread::spawn(move || {
-        // Shared parameters that the BinauralSource reads in real-time
-        let shared_freq = Arc::new(Mutex::new(200.0f32));
-        let shared_offset = Arc::new(Mutex::new(4.0f32));
-        let shared_amplitude = Arc::new(Mutex::new(0.0f32)); // start silent
+        // Shared parameters — lock-free AtomicU32 for audio thread reads
+        let shared_freq = Arc::new(AtomicU32::new(200.0f32.to_bits()));
+        let shared_offset = Arc::new(AtomicU32::new(4.0f32.to_bits()));
+        let shared_amplitude = Arc::new(AtomicU32::new(0.0f32.to_bits())); // start silent
 
         // Try to initialize audio output
         let output = match OutputStream::try_default() {
@@ -233,29 +240,20 @@ pub fn start_audio_engine() -> SharedAudioEngine {
                         }
                     }
                     Ok(AudioMessage::SetFrequencies { base_freq, binaural_offset }) => {
-                        if let Ok(mut f) = shared_freq.lock() {
-                            *f = base_freq.clamp(20.0, 1000.0);
-                        }
-                        if let Ok(mut o) = shared_offset.lock() {
-                            *o = binaural_offset.clamp(0.5, 40.0);
-                        }
+                        store_f32(&shared_freq, base_freq.clamp(20.0, 1000.0));
+                        store_f32(&shared_offset, binaural_offset.clamp(0.5, 40.0));
                         if let Ok(mut st) = state_clone.lock() {
                             st.base_freq = base_freq;
                             st.binaural_offset = binaural_offset;
                         }
                     }
                     Ok(AudioMessage::ClosedLoopAdjust { volume_delta, pitch_delta }) => {
-                        // Apply gradual adjustments from the biometric closed loop
                         target_volume = (target_volume + volume_delta).clamp(0.0, 1.0);
-                        if let Ok(mut o) = shared_offset.lock() {
-                            // Shift binaural offset: deeper relaxation → lower beat freq
-                            *o = (*o + pitch_delta).clamp(0.5, 40.0);
-                        }
+                        let cur_offset = load_f32(&shared_offset);
+                        store_f32(&shared_offset, (cur_offset + pitch_delta).clamp(0.5, 40.0));
                         if let Ok(mut st) = state_clone.lock() {
                             st.volume = target_volume;
-                            if let Ok(o) = shared_offset.lock() {
-                                st.binaural_offset = *o;
-                            }
+                            st.binaural_offset = load_f32(&shared_offset);
                         }
                     }
                     Ok(AudioMessage::Shutdown) => {
@@ -270,16 +268,14 @@ pub fn start_audio_engine() -> SharedAudioEngine {
             }
 
             // Smooth volume ramping (avoid clicks)
-            let ramp_speed = 0.02; // ~20ms steps at 50ms loop = ~500ms full ramp
+            let ramp_speed = 0.02;
             if (current_volume - target_volume).abs() > 0.001 {
                 if current_volume < target_volume {
                     current_volume = (current_volume + ramp_speed).min(target_volume);
                 } else {
                     current_volume = (current_volume - ramp_speed).max(target_volume);
                 }
-                if let Ok(mut a) = shared_amplitude.lock() {
-                    *a = current_volume;
-                }
+                store_f32(&shared_amplitude, current_volume);
             }
 
             // If faded out completely and not playing, pause the sink

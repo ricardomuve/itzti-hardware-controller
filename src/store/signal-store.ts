@@ -61,13 +61,15 @@ export const useSignalStore = create<SignalStoreState>((set) => ({
     set((state) => ({
       channels: state.channels.map((c) => {
         if (c.id !== channelId) return c;
-        const updated = [...c.samples, sample];
-        // Circular buffer: drop oldest samples when exceeding limit
-        const trimmed =
-          updated.length > MAX_SAMPLES_PER_CHANNEL
-            ? updated.slice(updated.length - MAX_SAMPLES_PER_CHANNEL)
-            : updated;
-        return { ...c, samples: trimmed };
+        // Mutate in-place to avoid O(n) array copy on every push.
+        // Zustand detects change via new channel object reference.
+        const samples = c.samples;
+        samples.push(sample);
+        // Circular buffer: drop oldest when exceeding limit
+        if (samples.length > MAX_SAMPLES_PER_CHANNEL) {
+          samples.splice(0, samples.length - MAX_SAMPLES_PER_CHANNEL);
+        }
+        return { ...c, samples };
       }),
     })),
 
