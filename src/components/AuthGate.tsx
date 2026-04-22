@@ -1,14 +1,14 @@
 /**
- * AuthGate — Wrapper component that reads the active role from auth-store
- * and conditionally renders UI components based on role permissions.
+ * AuthGate — Role-based layout for the sensory deprivation tank controller.
  *
- * Rol 'expert': Dashboard completo, BusPanel, LogPanel, KnobControl,
- *   SliderControl, PresetEditor, controles de umbrales.
- * Rol 'user': PresetSelector, gráficos en tiempo real (solo lectura),
- *   AlertPanel, controles de sesión.
- * Ambos roles: AlertPanel, botón de login/logout.
+ * Expert layout: 2-column grid optimized for session monitoring.
+ *   Left (primary): Fault alerts, biometrics, waveform, signals
+ *   Right (controls): Session, audio, watchdog, mixer, presets
+ *   Bottom: Collapsible secondary panels (bus, logs, dashboard)
  *
- * Requisitos: 1.4, 4.1, 4.2, 4.3, 4.4, 4.5, 5.1, 5.2, 5.3, 5.4, 5.5, 5.6
+ * User layout: Preset selector + read-only signals + alerts.
+ *
+ * Requisitos: 1.4, 4.1–4.5, 5.1–5.6
  */
 
 import { useCallback, useState } from 'react';
@@ -29,47 +29,52 @@ import SafeModeIndicator from './SafeModeIndicator';
 import HardwareFaultBanner from './HardwareFaultBanner';
 
 export interface AuthGateProps {
-  /** Optional callback when login/logout button is clicked */
   onLoginLogout?: () => void;
 }
 
-/**
- * Returns the set of visible component keys for a given role.
- * Useful for testing Property 5 (role-based visibility).
- */
 export function getVisibleComponents(role: UserRole): Set<string> {
   const common = new Set(['AlertPanel', 'LoginLogoutButton']);
-
   if (role === 'expert') {
     return new Set([
       ...common,
-      'Dashboard',
-      'BusPanel',
-      'LogPanel',
-      'KnobControl',
-      'SliderControl',
-      'PresetEditor',
-      'ThresholdControls',
-      'SignalDashboard',
-      'OutputControls',
-      'BiometricPanel',
-      'SessionControl',
-      'AudioControl',
-      'BiometricWaveform',
-      'SafeModeIndicator',
-      'HardwareFaultBanner',
+      'Dashboard', 'BusPanel', 'LogPanel', 'KnobControl', 'SliderControl',
+      'PresetEditor', 'ThresholdControls', 'SignalDashboard', 'OutputControls',
+      'BiometricPanel', 'SessionControl', 'AudioControl', 'BiometricWaveform',
+      'SafeModeIndicator', 'HardwareFaultBanner',
     ]);
   }
-
-  // role === 'user'
   return new Set([
-    ...common,
-    'PresetSelector',
-    'ReadOnlyCharts',
-    'SessionControls',
-    'SignalDashboard',
+    ...common, 'PresetSelector', 'ReadOnlyCharts', 'SessionControls', 'SignalDashboard',
   ]);
 }
+
+/* ── Collapsible section wrapper ─────────────────────────────── */
+
+function Section({
+  id, title, children, defaultOpen = true, className = '',
+}: {
+  id: string; title: string; children: React.ReactNode;
+  defaultOpen?: boolean; className?: string;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <section
+      data-testid={id}
+      className={`bg-surface-alt rounded-xl border border-border overflow-hidden ${className}`}
+    >
+      <button
+        onClick={() => setOpen((p) => !p)}
+        className="w-full flex items-center justify-between px-5 py-3 text-left hover:bg-surface-hover/30 transition-colors"
+      >
+        <span className="text-xs font-bold text-text-secondary uppercase tracking-wider">{title}</span>
+        <span className="text-text-muted text-xs">{open ? '▾' : '▸'}</span>
+      </button>
+      {open && <div className="px-5 pb-5">{children}</div>}
+    </section>
+  );
+}
+
+/* ── Main component ──────────────────────────────────────────── */
 
 export default function AuthGate({ onLoginLogout }: AuthGateProps) {
   const role = useAuthStore((s) => s.role);
@@ -80,25 +85,21 @@ export default function AuthGate({ onLoginLogout }: AuthGateProps) {
 
   const handleClearLog = useCallback(() => setLogEntries([]), []);
   const handleClearAlerts = useCallback(() => setAlerts([]), []);
-
   const handleBusLogEntry = useCallback((entry: LogEntry) => {
     setLogEntries((prev) => [...prev, entry]);
   }, []);
-
   const handleBusAlert = useCallback((alert: Alert) => {
     setAlerts((prev) => [...prev, alert]);
   }, []);
 
   const handleLoginLogout = useCallback(() => {
-    if (role === 'expert') {
-      logout();
-    }
+    if (role === 'expert') logout();
     onLoginLogout?.();
   }, [role, logout, onLoginLogout]);
 
   return (
-    <div data-testid="auth-gate" data-role={role} className="space-y-6">
-      {/* Login/Logout button — visible for both roles */}
+    <div data-testid="auth-gate" data-role={role} className="space-y-4">
+      {/* Login/Logout — always visible */}
       <div data-testid="auth-controls" className="flex justify-end">
         <button
           data-testid="login-logout-btn"
@@ -113,72 +114,86 @@ export default function AuthGate({ onLoginLogout }: AuthGateProps) {
         </button>
       </div>
 
-      {/* Expert-only components */}
+      {/* ═══════════════ EXPERT LAYOUT ═══════════════ */}
       {role === 'expert' && (
-        <div className="space-y-6">
-          {/* Hardware fault alerts — highest priority, always visible */}
-          <HardwareFaultBanner />
-
-          {/* Biometric monitoring — top priority for tank sessions */}
-          <section data-testid="expert-biometric-panel" className="bg-surface-alt rounded-xl border border-border p-5">
-            <BiometricPanel />
-          </section>
-
-          {/* High-speed biometric waveform visualization */}
-          <section data-testid="expert-biometric-waveform" className="bg-surface-alt rounded-xl border border-border p-5">
-            <BiometricWaveform />
-          </section>
-
-          {/* Session control + Audio + Watchdog */}
-          <section data-testid="expert-session-control" className="bg-surface-alt rounded-xl border border-border p-5">
-            <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-              <SessionControl />
-              <AudioControl />
-              <SafeModeIndicator />
-            </div>
-          </section>
-
-          <section data-testid="expert-dashboard" className="bg-surface-alt rounded-xl border border-border p-5">
-            <Dashboard />
-          </section>
-
-          <div className="grid grid-cols-1 xl:grid-cols-2 gap-6">
-            <section data-testid="expert-bus-panel" className="bg-surface-alt rounded-xl border border-border p-5">
-              <BusPanel onLogEntry={handleBusLogEntry} onAlert={handleBusAlert} />
-            </section>
-
-            <section data-testid="expert-log-panel" className="bg-surface-alt rounded-xl border border-border p-5">
-              <LogPanel entries={logEntries} onClear={handleClearLog} />
-            </section>
+        <div className="space-y-4">
+          {/* ── STICKY: Hardware fault banner ── */}
+          <div className="sticky top-0 z-10">
+            <HardwareFaultBanner />
           </div>
 
-          <section data-testid="expert-preset-editor" className="bg-surface-alt rounded-xl border border-border p-5">
-            <PresetEditor />
-          </section>
+          {/* ── PRIMARY: 2-column grid ── */}
+          <div className="grid grid-cols-1 xl:grid-cols-[1fr_380px] gap-4">
 
-          <section data-testid="expert-output-controls" className="bg-surface-alt rounded-xl border border-border p-5">
-            <OutputControls />
-          </section>
+            {/* LEFT COLUMN: Monitoring (what the expert watches) */}
+            <div className="space-y-4 min-w-0">
+              <section data-testid="expert-biometric-panel" className="bg-surface-alt rounded-xl border border-border p-5">
+                <BiometricPanel />
+              </section>
 
-          <section data-testid="expert-threshold-controls" className="bg-surface-alt rounded-xl border border-border p-5">
-            <div data-testid="threshold-controls-placeholder" className="text-text-muted text-sm">Controles de Umbrales</div>
-          </section>
+              <section data-testid="expert-biometric-waveform" className="bg-surface-alt rounded-xl border border-border p-5">
+                <BiometricWaveform />
+              </section>
+
+              <Section id="expert-output-controls" title="Mixer de Salida">
+                <OutputControls />
+              </Section>
+            </div>
+
+            {/* RIGHT COLUMN: Controls (what the expert operates) */}
+            <div className="space-y-4">
+              <section data-testid="expert-session-control" className="bg-surface-alt rounded-xl border border-border p-5 space-y-6">
+                <SessionControl />
+                <div className="border-t border-border/40 pt-4">
+                  <SafeModeIndicator />
+                </div>
+              </section>
+
+              <section className="bg-surface-alt rounded-xl border border-border p-5">
+                <AudioControl />
+              </section>
+
+              <Section id="expert-preset-editor" title="Editor de Presets" defaultOpen={false}>
+                <PresetEditor />
+              </Section>
+
+              <Section id="expert-threshold-controls" title="Umbrales" defaultOpen={false}>
+                <div data-testid="threshold-controls-placeholder" className="text-text-muted text-sm">
+                  Controles de Umbrales
+                </div>
+              </Section>
+            </div>
+          </div>
+
+          {/* ── SECONDARY: Collapsible panels ── */}
+          <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+            <Section id="expert-dashboard" title="Dispositivos y Señales" defaultOpen={false}>
+              <Dashboard />
+            </Section>
+
+            <Section id="expert-bus-panel" title="Bus I2C/SPI" defaultOpen={false}>
+              <BusPanel onLogEntry={handleBusLogEntry} onAlert={handleBusAlert} />
+            </Section>
+          </div>
+
+          <Section id="expert-log-panel" title="Log de Comunicación" defaultOpen={false}>
+            <LogPanel entries={logEntries} onClear={handleClearLog} />
+          </Section>
         </div>
       )}
 
-      {/* User-only components */}
+      {/* ═══════════════ USER LAYOUT ═══════════════ */}
       {role === 'user' && (
         <section data-testid="user-preset-selector" className="bg-surface-alt rounded-xl border border-border p-5">
           <PresetSelector />
         </section>
       )}
 
-      {/* Signal dashboard — both roles, but read-only for user */}
+      {/* ═══════════════ SHARED ═══════════════ */}
       <section data-testid="signal-section" className="bg-surface-alt rounded-xl border border-border p-5">
         <SignalDashboard />
       </section>
 
-      {/* AlertPanel — visible for both roles (Req 5.6) */}
       <section data-testid="shared-alert-panel" className="bg-surface-alt rounded-xl border border-border p-5">
         <AlertPanel alerts={alerts} onClear={handleClearAlerts} />
       </section>

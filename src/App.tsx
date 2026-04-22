@@ -13,6 +13,7 @@ import { useSignalStore } from './store/signal-store';
 import { useAuthStore } from './store/auth-store';
 import { usePresetStore } from './store/preset-store';
 import { useBiometricStore } from './store/biometric-store';
+import { useSessionStore } from './store/session-store';
 import AuthGate from './components/AuthGate';
 import PinDialog, { type PinDialogMode } from './components/PinDialog';
 import DeviceList from './components/DeviceList';
@@ -31,6 +32,11 @@ export default function App() {
 
   const role = useAuthStore((s) => s.role);
   const pinHashExists = useAuthStore((s) => s.pinHashExists);
+
+  // Live status values for the header bar (must be before early returns — React hook rules)
+  const relaxationScore = useBiometricStore((s) => s.relaxationScore);
+  const sessionActive = useSessionStore((s) => s.activeSessionId);
+  const channelCount = useSignalStore((s) => s.channels.length);
 
   // Load PIN status and presets on mount (Req 2.5, 7.2)
   useEffect(() => {
@@ -122,10 +128,9 @@ export default function App() {
 
   return (
     <div data-testid="app" className="min-h-screen flex flex-col">
-      {/* Top header bar */}
-      <header className="bg-surface-alt border-b border-border px-4 md:px-6 py-3 flex items-center justify-between shrink-0">
+      {/* Top header bar — shows live session status */}
+      <header className="bg-surface-alt border-b border-border px-4 md:px-6 py-2 flex items-center justify-between shrink-0">
         <div className="flex items-center gap-3">
-          {/* Hamburger — visible only on small screens */}
           <button
             onClick={() => setSidebarOpen(!sidebarOpen)}
             className="md:hidden p-1 text-text-secondary hover:text-text-primary transition-colors"
@@ -139,15 +144,38 @@ export default function App() {
           </button>
           <img src="/logo.png" alt="ItztI logo" className="w-7 h-7 object-contain" />
           <h1 className="text-lg font-semibold text-text-primary tracking-tight">ItztI</h1>
-          <span className="text-xs text-text-muted bg-surface px-2 py-0.5 rounded-full hidden sm:inline">
+          <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium ${
+            role === 'expert' ? 'bg-accent/15 text-accent' : 'bg-surface text-text-muted'
+          }`}>
             {role === 'expert' ? 'Experto' : 'Usuario'}
           </span>
         </div>
+
+        {/* Live status indicators — visible when expert */}
+        {role === 'expert' && (
+          <div className="hidden sm:flex items-center gap-3 text-[10px] font-mono">
+            {sessionActive && (
+              <div className="flex items-center gap-1.5 px-2 py-1 rounded-full bg-success/10">
+                <div className="w-1.5 h-1.5 rounded-full bg-success animate-pulse" />
+                <span className="text-success">SESIÓN</span>
+              </div>
+            )}
+            <div className="flex items-center gap-1.5 px-2 py-1 rounded-full bg-surface">
+              <span className="text-text-muted">Relax</span>
+              <span className={`font-bold ${
+                relaxationScore > 60 ? 'text-success' : relaxationScore > 30 ? 'text-warning' : 'text-text-secondary'
+              }`}>{relaxationScore}%</span>
+            </div>
+            <div className="flex items-center gap-1.5 px-2 py-1 rounded-full bg-surface">
+              <span className="text-text-muted">CH</span>
+              <span className="text-text-secondary">{channelCount}</span>
+            </div>
+          </div>
+        )}
       </header>
 
       {/* Main content area */}
       <div className="flex-1 flex overflow-hidden relative">
-        {/* Backdrop overlay — mobile only, when sidebar is open */}
         {sidebarOpen && (
           <div
             className="fixed inset-0 bg-black/40 z-20 md:hidden"
@@ -155,27 +183,26 @@ export default function App() {
           />
         )}
 
-        {/* Sidebar — always visible on md+, drawer on mobile */}
+        {/* Sidebar — narrow on desktop, drawer on mobile */}
         <aside className={`
           fixed md:static inset-y-0 left-0 z-30
-          w-72 bg-surface-alt border-r border-border overflow-y-auto shrink-0
+          w-64 bg-surface-alt border-r border-border overflow-y-auto shrink-0
           transform transition-transform duration-200 ease-in-out
           ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}
           md:translate-x-0
-          top-[53px] md:top-0
+          top-[45px] md:top-0
         `}>
-          <section data-testid="section-devices" className="p-4">
+          <section data-testid="section-devices" className="p-3">
             <DeviceList hardwarePort={port} />
           </section>
         </aside>
 
         {/* Main dashboard area */}
-        <main className="flex-1 overflow-y-auto p-4 md:p-6" data-testid="section-dashboard">
+        <main className="flex-1 overflow-y-auto p-3 md:p-5" data-testid="section-dashboard">
           <AuthGate onLoginLogout={handleLoginLogout} />
         </main>
       </div>
 
-      {/* PinDialog — accessible from both roles (Req 2.1, 2.5) */}
       <PinDialog
         mode={pinDialogMode}
         open={pinDialogOpen}
