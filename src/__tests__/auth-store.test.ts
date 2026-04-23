@@ -20,12 +20,20 @@ const mockReadPinHash = vi.fn<() => Promise<string | null>>();
 const mockWritePinHash = vi.fn<(hash: string) => Promise<void>>();
 const mockHashPin = vi.fn<(pin: string) => Promise<string>>();
 const mockValidatePinFormat = vi.fn<(pin: string) => boolean>();
+const mockVerifyPin = vi.fn<(pin: string, stored: string) => Promise<boolean>>();
+const mockCheckRateLimit = vi.fn(() => ({ locked: false, remainingMs: 0 }));
+const mockRecordFailedAttempt = vi.fn(() => 4);
+const mockResetAttempts = vi.fn();
 
 vi.mock('../utils/pin-hash', () => ({
   hashPin: (...args: unknown[]) => mockHashPin(args[0] as string),
+  verifyPin: (...args: unknown[]) => mockVerifyPin(args[0] as string, args[1] as string),
   validatePinFormat: (...args: unknown[]) => mockValidatePinFormat(args[0] as string),
   readPinHash: () => mockReadPinHash(),
   writePinHash: (...args: unknown[]) => mockWritePinHash(args[0] as string),
+  checkRateLimit: () => mockCheckRateLimit(),
+  recordFailedAttempt: () => mockRecordFailedAttempt(),
+  resetAttempts: () => mockResetAttempts(),
 }));
 
 import { useAuthStore } from '../store/auth-store';
@@ -102,17 +110,15 @@ describe('auth-store: flujo de configuración inicial de PIN', () => {
 });
 
 describe('auth-store: login con PIN inválido', () => {
-  /**
-   * Validates: Requisito 2.2
-   * Login con PIN inválido mantiene rol 'user' y retorna false.
-   */
-  it('login with wrong PIN keeps role "user" and returns false', async () => {
+  it('login with wrong PIN keeps role "user" and returns result object', async () => {
     mockReadPinHash.mockResolvedValue(KNOWN_HASH);
-    mockHashPin.mockResolvedValue('wrong-hash-value');
+    mockVerifyPin.mockResolvedValue(false);
+    mockRecordFailedAttempt.mockReturnValue(4);
 
     const result = await useAuthStore.getState().login('9999');
 
-    expect(result).toBe(false);
+    expect(result.success).toBe(false);
+    expect(result.remainingAttempts).toBe(4);
     expect(useAuthStore.getState().role).toBe('user');
   });
 
@@ -121,7 +127,7 @@ describe('auth-store: login con PIN inválido', () => {
 
     const result = await useAuthStore.getState().login('1234');
 
-    expect(result).toBe(false);
+    expect(result.success).toBe(false);
     expect(useAuthStore.getState().role).toBe('user');
   });
 });

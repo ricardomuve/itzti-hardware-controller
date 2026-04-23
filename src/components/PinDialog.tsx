@@ -49,10 +49,15 @@ export default function PinDialog({ mode, open, onClose }: PinDialogProps) {
     }
     setLoading(true);
     try {
-      const success = await login(pin);
-      if (success) {
+      const result = await login(pin);
+      if (result.success) {
         resetFields();
         onClose();
+      } else if (result.lockedMs && result.lockedMs > 0) {
+        const secs = Math.ceil(result.lockedMs / 1000);
+        setError(`Demasiados intentos. Espere ${secs} segundos.`);
+      } else if (result.remainingAttempts !== undefined) {
+        setError(`PIN incorrecto. ${result.remainingAttempts} intento${result.remainingAttempts !== 1 ? 's' : ''} restante${result.remainingAttempts !== 1 ? 's' : ''}.`);
       } else {
         setError('PIN incorrecto.');
       }

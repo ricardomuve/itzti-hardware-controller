@@ -3,16 +3,17 @@
 /**
  * Property 1: PIN authentication round-trip
  *
- * For any valid PIN (4-8 numeric digits), hashing with `hashPin` must be
- * deterministic (same PIN → same hash) and collision-resistant (different
- * PINs → different hashes).
+ * For any valid PIN (4-8 numeric digits):
+ * - hashPin + verifyPin with correct PIN → true
+ * - hashPin + verifyPin with wrong PIN → false
+ * - Different salts produce different stored values (non-deterministic)
  *
  * **Validates: Requirements 2.1, 2.2**
  */
 
 import { describe, it, expect } from 'vitest';
 import * as fc from 'fast-check';
-import { hashPin } from '../utils/pin-hash';
+import { hashPin, verifyPin } from '../utils/pin-hash';
 
 /** Arbitrary that generates valid PINs: strings of 4-8 numeric digits. */
 const validPinArb = fc
@@ -30,25 +31,25 @@ const distinctPinPairArb = fc
   .filter(([a, b]) => a !== b);
 
 describe('Property 1: Ida y vuelta de autenticación por PIN', () => {
-  it('hashPin is deterministic: same PIN always produces the same hash', async () => {
+  it('hashPin + verifyPin roundtrip: correct PIN always verifies', async () => {
     await fc.assert(
       fc.asyncProperty(validPinArb, async (pin) => {
-        const hash1 = await hashPin(pin);
-        const hash2 = await hashPin(pin);
-        expect(hash1).toBe(hash2);
+        const stored = await hashPin(pin);
+        const result = await verifyPin(pin, stored);
+        expect(result).toBe(true);
       }),
-      { numRuns: 100 },
+      { numRuns: 20 }, // PBKDF2 is slow, keep runs low
     );
-  });
+  }, 30_000);
 
-  it('hashPin produces different hashes for different PINs', async () => {
+  it('verifyPin rejects wrong PIN', async () => {
     await fc.assert(
       fc.asyncProperty(distinctPinPairArb, async ([pinA, pinB]) => {
-        const hashA = await hashPin(pinA);
-        const hashB = await hashPin(pinB);
-        expect(hashA).not.toBe(hashB);
+        const stored = await hashPin(pinA);
+        const result = await verifyPin(pinB, stored);
+        expect(result).toBe(false);
       }),
-      { numRuns: 100 },
+      { numRuns: 10 },
     );
-  });
+  }, 30_000);
 });

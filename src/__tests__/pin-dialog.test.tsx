@@ -65,7 +65,7 @@ describe('PinDialog — login mode (Req 2.1, 2.2)', () => {
   });
 
   it('should call onClose on successful login', async () => {
-    const loginMock = vi.fn().mockResolvedValue(true);
+    const loginMock = vi.fn().mockResolvedValue({ success: true });
     useAuthStore.setState({ login: loginMock } as any);
     const onClose = vi.fn();
 
